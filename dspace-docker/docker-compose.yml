@@ -1,0 +1,228 @@
+# ===========================================
+# DSpace Docker Compose Configuration
+# Production-ready setup based on official DSpace Docker deployment
+# ===========================================
+#
+# Usage:
+#   Start all services:     docker compose up -d
+#   View logs:              docker compose logs -f
+#   Stop all services:      docker compose down
+#   Reset everything:       docker compose down -v
+#
+# Services:
+#   - dspacedb:      PostgreSQL 15 database
+#   - dspacesolr:    Apache Solr search engine
+#   - dspace:        DSpace REST API backend
+#   - dspace-angular: DSpace Angular frontend (optional)
+#
+# ===========================================
+
+networks:
+  dspacenet:
+    ipam:
+      config:
+        # Define a custom subnet for DSpace network
+        # This is used for trusted proxy configuration
+        - subnet: 172.23.0.0/16
+
+volumes:
+  assetstore:    # DSpace asset/bitstream storage
+  solr_data:     # Solr index data
+  # Note: pgdata volume removed - using external Supabase database
+
+services:
+  # ===========================================
+  # PostgreSQL Database (Supabase)
+  # ===========================================
+  # NOTE: Using external Supabase database
+  # Local PostgreSQL container is removed
+  # Connection configured via environment variables below
+
+  # ===========================================
+  # Apache Solr Search Engine
+  # ===========================================
+  dspacesolr:
+    container_name: dspacesolr
+    image: dspace/dspace-solr:latest
+    networks:
+      - dspacenet
+    ports:
+      - "8983:8983"
+    stdin_open: true
+    tty: true
+    working_dir: /var/solr/data
+    volumes:
+      - solr_data:/var/solr/data
+    # Run as root to initialize, then switch to solr user
+    user: root
+    entrypoint:
+      - /bin/bash
+      - '-c'
+      - |
+        # Initialize Solr data directory
+        init-var-solr
+        
+        # Create all 7 required DSpace Solr cores
+        # Each core has its own configset in the DSpace Solr image
+        echo "Creating Solr cores for DSpace..."
+        
+        precreate-core authority /opt/solr/server/solr/configsets/authority
+        cp -r /opt/solr/server/solr/configsets/authority/* authority
+        
+        precreate-core oai /opt/solr/server/solr/configsets/oai
+        cp -r /opt/solr/server/solr/configsets/oai/* oai
+        
+        precreate-core search /opt/solr/server/solr/configsets/search
+        cp -r /opt/solr/server/solr/configsets/search/* search
+        
+        precreate-core statistics /opt/solr/server/solr/configsets/statistics
+        cp -r /opt/solr/server/solr/configsets/statistics/* statistics
+        
+        precreate-core qaevent /opt/solr/server/solr/configsets/qaevent
+        cp -r /opt/solr/server/solr/configsets/qaevent/* qaevent
+        
+        precreate-core suggestion /opt/solr/server/solr/configsets/suggestion
+        cp -r /opt/solr/server/solr/configsets/suggestion/* suggestion
+        
+        precreate-core audit /opt/solr/server/solr/configsets/audit
+        cp -r /opt/solr/server/solr/configsets/audit/* audit
+        
+        echo "All Solr cores created successfully!"
+        
+        # Fix ownership and start Solr as solr user
+        chown -R solr:solr /var/solr
+        runuser -u solr -- solr-foreground
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8983/solr/search/admin/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # ===========================================
+  # DSpace Backend (REST API)
+  # ===========================================
+  dspace:
+    container_name: dspace
+    image: dspace/dspace:latest-test
+    environment:
+      # DSpace configuration via environment variables
+      # Note: Use double underscore (__P__) for dots in property names
+      dspace__P__dir: /dspace
+      dspace__P__name: '${DSPACE_NAME:-DSpace Repository}'
+      dspace__P__server__P__url: '${DSPACE_SERVER_URL:-http://localhost:8080/server}'
+      dspace__P__ui__P__url: '${DSPACE_UI_URL:-http://localhost:4000}'
+      # Supabase Database configuration
+      db__P__url: 'jdbc:postgresql://${SUPABASE_HOST}:${SUPABASE_PORT:-5432}/${SUPABASE_DATABASE:-postgres}?sslmode=require'
+      db__P__username: '${SUPABASE_USER}'
+      db__P__password: '${SUPABASE_PASSWORD}'
+      # Solr configuration
+      solr__P__server: http://dspacesolr:8983/solr
+      # Trusted proxy IP ranges (matches our subnet)
+      proxies__P__trusted__P__ipranges: '172.23.0'
+      # Logging configuration
+      LOGGING_CONFIG: /dspace/config/log4j2-container.xml
+      # Admin account (optional - for first-time setup)
+      ADMIN_EMAIL: '${DSPACE_ADMIN_EMAIL:-}'
+      ADMIN_PASSWORD: '${DSPACE_ADMIN_PASSWORD:-}'
+      ADMIN_FIRSTNAME: '${DSPACE_ADMIN_FIRSTNAME:-Admin}'
+      ADMIN_LASTNAME: '${DSPACE_ADMIN_LASTNAME:-User}'
+    depends_on:
+      dspacesolr:
+        condition: service_healthy
+    networks:
+      - dspacenet
+    ports:
+      - "8080:8080"   # REST API
+      - "8000:8000"   # Debug port (optional)
+    stdin_open: true
+    tty: true
+    volumes:
+      - assetstore:/dspace/assetstore
+      - ./local.cfg:/dspace/config/local.cfg:ro
+    # Custom entrypoint: wait for DB, run migrations, start server
+    entrypoint:
+      - /bin/bash
+      - '-c'
+      - |
+        echo "========================================"
+        echo "DSpace Backend Starting..."
+        echo "========================================"
+        
+        # Wait for Supabase PostgreSQL to be ready
+        echo "Waiting for Supabase PostgreSQL..."
+        DB_HOST=$(echo "$${db__P__url}" | sed -n 's|.*://\([^:]*\):.*|\1|p')
+        DB_PORT=$(echo "$${db__P__url}" | sed -n 's|.*:\([0-9]*\)/.*|\1|p')
+        echo "Database: $${DB_HOST}:$${DB_PORT}"
+        
+        # Check database connectivity with timeout
+        max_retries=30
+        retry_count=0
+        until timeout 5 bash -c "cat < /dev/null > /dev/tcp/$${DB_HOST}/$${DB_PORT}" 2>/dev/null || [ $$retry_count -ge $$max_retries ]; do
+          retry_count=$$((retry_count + 1))
+          echo "Supabase not reachable yet (attempt $$retry_count/$$max_retries)..."
+          sleep 2
+        done
+        
+        if [ $$retry_count -ge $$max_retries ]; then
+          echo "WARNING: Could not verify Supabase connection (may be IPv6-only)"
+          echo "Proceeding anyway - DSpace will fail if connection is truly unavailable"
+        else
+          echo "Supabase is reachable!"
+        fi
+        
+        # Wait for Solr to be ready (critical for DSpace startup)
+        echo "Waiting for Solr..."
+        until curl -sf "http://dspacesolr:8983/solr/search/admin/ping" > /dev/null 2>&1; do
+          echo "Solr is not ready yet. Waiting..."
+          sleep 2
+        done
+        echo "Solr is ready!"
+        
+        # Run database migrations
+        echo "Database URL: $${db__P__url}"
+        echo "Migrating database to latest version..."
+        /dspace/bin/dspace database migrate
+        
+        echo "========================================"
+        echo "Starting DSpace Server..."
+        echo "========================================"
+        
+        # Start DSpace with embedded Tomcat
+        exec java -jar /dspace/webapps/server-boot.jar --dspace.dir=/dspace
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/server/api || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
+  # ===========================================
+  # DSpace Angular Frontend (Optional)
+  # ===========================================
+  dspace-angular:
+    container_name: dspace-angular
+    image: dspace/dspace-angular:latest
+    depends_on:
+      dspace:
+        condition: service_healthy
+    environment:
+      DSPACE_UI_SSL: "false"
+      DSPACE_UI_HOST: 0.0.0.0
+      DSPACE_UI_PORT: "4000"
+      DSPACE_UI_NAMESPACE: /
+      DSPACE_REST_SSL: "false"
+      # Use localhost for browser access (Angular runs client-side in dev mode)
+      DSPACE_REST_HOST: localhost
+      DSPACE_REST_PORT: "8080"
+      DSPACE_REST_NAMESPACE: /server
+    networks:
+      - dspacenet
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

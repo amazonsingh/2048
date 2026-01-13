@@ -1,0 +1,66 @@
+# ===========================================
+# DSpace 8 Frontend Dockerfile
+# Angular-based User Interface
+# ===========================================
+
+# Stage 1: Build Frontend
+FROM node:18-alpine AS builder
+
+# DSpace Angular version
+ARG DSPACE_ANGULAR_VERSION=8.0
+
+# Install git
+RUN apk add --no-cache git
+
+# Clone DSpace Angular UI
+WORKDIR /build
+RUN git clone --branch dspace-${DSPACE_ANGULAR_VERSION} --depth 1 \
+    https://github.com/DSpace/dspace-angular.git dspace-ui
+
+WORKDIR /build/dspace-ui
+
+# Install dependencies
+RUN yarn install --frozen-lockfile
+
+# Build production bundle
+RUN yarn build:prod
+
+# Stage 2: Runtime Image
+FROM node:18-alpine
+
+LABEL maintainer="Aria University Library <library@aria.edu>"
+LABEL description="DSpace 8 Angular Frontend for Aria University Digital Library"
+
+# Create app user
+RUN addgroup -S dspace && adduser -S dspace -G dspace
+
+# Install curl for health checks
+RUN apk add --no-cache curl
+
+# Set working directory
+WORKDIR /app
+
+# Copy built application from builder stage
+COPY --from=builder /build/dspace-ui/dist /app/dist
+COPY --from=builder /build/dspace-ui/node_modules /app/node_modules
+COPY --from=builder /build/dspace-ui/config /app/config
+
+# Copy entrypoint script
+COPY scripts/frontend-entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Set ownership
+RUN chown -R dspace:dspace /app
+
+# Switch to non-root user
+USER dspace
+
+# Expose port
+EXPOSE 4000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:4000 || exit 1
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["node", "/app/dist/server/main.js"]

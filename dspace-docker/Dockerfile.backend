@@ -1,0 +1,76 @@
+# ===========================================
+# DSpace 8 Backend Dockerfile
+# Builds DSpace as a standalone runnable JAR with embedded Tomcat
+# ===========================================
+
+# Stage 1: Build DSpace
+FROM maven:3.9-eclipse-temurin-17 AS builder
+
+# DSpace version to build
+ARG DSPACE_VERSION=8.0
+
+# Install necessary tools
+RUN apt-get update && apt-get install -y \
+    git \
+    ant \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone DSpace source
+WORKDIR /build
+RUN git clone --branch dspace-${DSPACE_VERSION} --depth 1 \
+    https://github.com/DSpace/DSpace.git dspace-src
+
+WORKDIR /build/dspace-src
+
+# Build DSpace (skip tests for faster build)
+RUN mvn package -Pdspace-rest -Dmirage2.on=true -DskipTests
+
+# Install DSpace to /dspace directory
+# Use update_webapps to install WAR files without database test
+WORKDIR /build/dspace-src/dspace/target/dspace-installer
+RUN ant init_installation init_configs update_webapps update_solr_indexes
+
+# Stage 2: Runtime Image
+FROM eclipse-temurin:17-jre-jammy
+
+LABEL maintainer="Aria University Library <library@aria.edu>"
+LABEL description="DSpace 8 Backend Server for Aria University Digital Library"
+
+# Create dspace user for security
+RUN useradd -m -d /dspace -s /bin/bash dspace
+
+# Install required packages (including Flyway dependencies)
+RUN apt-get update && apt-get install -y \
+    curl \
+    postgresql-client \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy DSpace installation from builder
+COPY --from=builder /dspace /dspace
+
+# Set ownership
+RUN chown -R dspace:dspace /dspace
+
+# Create necessary directories
+RUN mkdir -p /dspace/assetstore /dspace/exports /dspace/log \
+    && chown -R dspace:dspace /dspace
+
+# Switch to dspace user
+USER dspace
+WORKDIR /dspace
+
+# Expose port
+EXPOSE 8080
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:8080/server/api || exit 1
+
+# Entrypoint script
+COPY --chown=dspace:dspace scripts/backend-entrypoint.sh /dspace/entrypoint.sh
+RUN chmod +x /dspace/entrypoint.sh
+
+ENTRYPOINT ["/dspace/entrypoint.sh"]
+CMD ["java", "-jar", "/dspace/webapps/server-boot.jar", "--dspace.dir=/dspace"]

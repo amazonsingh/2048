@@ -1,0 +1,31 @@
+# Environment files with secrets
+.env
+*.env.local
+
+# Docker volumes
+volumes/
+
+# Logs
+*.log
+logs/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.jar
+*.war
+node_modules/
+dist/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
