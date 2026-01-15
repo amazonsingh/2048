@@ -110,7 +110,7 @@ services:
       # Note: Use double underscore (__P__) for dots in property names
       dspace__P__dir: /dspace
       dspace__P__name: '${DSPACE_NAME:-DSpace Repository}'
-      dspace__P__server__P__url: '${DSPACE_SERVER_URL:-http://localhost:8080/server}'
+      dspace__P__server__P__url: '${DSPACE_SERVER_URL:-http://localhost:8080}/server'
       dspace__P__ui__P__url: '${DSPACE_UI_URL:-http://localhost:4000}'
       # Supabase Database configuration
       db__P__url: 'jdbc:postgresql://${SUPABASE_HOST}:${SUPABASE_PORT:-5432}/${SUPABASE_DATABASE:-postgres}?sslmode=require'
